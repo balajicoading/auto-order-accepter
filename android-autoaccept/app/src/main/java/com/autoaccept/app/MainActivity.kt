@@ -2,6 +2,7 @@ package com.autoaccept.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -22,7 +23,14 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val REQUEST_NOTIFICATION_PERMISSION = 1
         private const val REQUEST_MEDIA_PROJECTION = 2
+        private const val PERMISSION_STEP_NONE = 0
+        private const val PERMISSION_STEP_NOTIFICATION = 1
+        private const val PERMISSION_STEP_ACCESSIBILITY = 2
+        private const val PERMISSION_STEP_SCREEN_CAPTURE = 3
+        private const val PERMISSION_STEP_COMPLETE = 4
     }
+
+    private var currentPermissionStep = PERMISSION_STEP_NONE
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,12 +39,15 @@ class MainActivity : AppCompatActivity() {
 
         loadPreferences()
         setupListeners()
-        requestNotificationPermission()
+        checkPermissionStatus()
     }
 
     override fun onResume() {
         super.onResume()
         binding.switchEnable.isChecked = Prefs.isEnabled(this)
+        if (currentPermissionStep > PERMISSION_STEP_NONE) {
+            continuePermissionFlow()
+        }
     }
 
     private fun loadPreferences() {
@@ -53,19 +64,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         binding.switchEnable.setOnCheckedChangeListener { _, isChecked ->
-            if (isChecked && !isAccessibilityServiceEnabled()) {
-                binding.switchEnable.isChecked = false
-                openAccessibilitySettings()
-                return@setOnCheckedChangeListener
+            if (isChecked) {
+                startPermissionFlow()
+            } else {
+                savePreferences()
+                Prefs.setEnabled(this, isChecked)
+                OrderAccessibilityService.instance?.refreshLoop()
             }
-
-            if (isChecked && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                requestMediaProjectionPermission()
-            }
-
-            savePreferences()
-            Prefs.setEnabled(this, isChecked)
-            OrderAccessibilityService.instance?.refreshLoop()
         }
 
         binding.editStartX.setOnFocusChangeListener { _, hasFocus ->
@@ -151,19 +156,106 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Enable AutoAccept service", Toast.LENGTH_LONG).show()
     }
 
+    private fun checkPermissionStatus() {
+        val hasNotification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        val hasAccessibility = isAccessibilityServiceEnabled()
+
+        if (!hasNotification || !hasAccessibility) {
+            binding.switchEnable.isChecked = false
+        }
+    }
+
+    private fun startPermissionFlow() {
+        currentPermissionStep = PERMISSION_STEP_NOTIFICATION
+        continuePermissionFlow()
+    }
+
+    private fun continuePermissionFlow() {
+        when (currentPermissionStep) {
+            PERMISSION_STEP_NOTIFICATION -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    if (ContextCompat.checkSelfPermission(
+                            this,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        showPermissionDialog(
+                            title = "Permission 1 of 3: Notifications",
+                            message = "This app needs notification permission to alert you when orders are detected and auto-accepted.\n\nClick 'Continue' to grant this permission.",
+                            onContinue = { requestNotificationPermission() }
+                        )
+                    } else {
+                        currentPermissionStep = PERMISSION_STEP_ACCESSIBILITY
+                        continuePermissionFlow()
+                    }
+                } else {
+                    currentPermissionStep = PERMISSION_STEP_ACCESSIBILITY
+                    continuePermissionFlow()
+                }
+            }
+            PERMISSION_STEP_ACCESSIBILITY -> {
+                if (!isAccessibilityServiceEnabled()) {
+                    showPermissionDialog(
+                        title = "Permission 2 of 3: Accessibility Service",
+                        message = "This app needs accessibility permission to:\n• Detect order notifications\n• Read order details from the screen\n• Automatically tap 'Accept' buttons\n\nClick 'Continue' to open Accessibility Settings.",
+                        onContinue = { openAccessibilitySettings() }
+                    )
+                } else {
+                    currentPermissionStep = PERMISSION_STEP_SCREEN_CAPTURE
+                    continuePermissionFlow()
+                }
+            }
+            PERMISSION_STEP_SCREEN_CAPTURE -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    showPermissionDialog(
+                        title = "Permission 3 of 3: Screen Capture",
+                        message = "This app needs screen capture permission to read order information from notifications.\n\nYour screen content is NOT recorded or saved.\n\nClick 'Continue' to grant this permission.",
+                        onContinue = { requestMediaProjectionPermission() }
+                    )
+                } else {
+                    currentPermissionStep = PERMISSION_STEP_COMPLETE
+                    continuePermissionFlow()
+                }
+            }
+            PERMISSION_STEP_COMPLETE -> {
+                currentPermissionStep = PERMISSION_STEP_NONE
+                savePreferences()
+                Prefs.setEnabled(this, true)
+                OrderAccessibilityService.instance?.refreshLoop()
+                Toast.makeText(this, "✓ All permissions granted! Auto-Accept is now active.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun showPermissionDialog(title: String, message: String, onContinue: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("Continue") { _, _ -> onContinue() }
+            .setNegativeButton("Cancel") { _, _ ->
+                currentPermissionStep = PERMISSION_STEP_NONE
+                binding.switchEnable.isChecked = false
+                Toast.makeText(this, "Permission setup cancelled", Toast.LENGTH_SHORT).show()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    REQUEST_NOTIFICATION_PERMISSION
-                )
-            }
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION
+            )
         }
     }
 
@@ -172,16 +264,38 @@ class MainActivity : AppCompatActivity() {
         startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            REQUEST_NOTIFICATION_PERMISSION -> {
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    currentPermissionStep = PERMISSION_STEP_ACCESSIBILITY
+                    continuePermissionFlow()
+                } else {
+                    currentPermissionStep = PERMISSION_STEP_NONE
+                    binding.switchEnable.isChecked = false
+                    Toast.makeText(this, "Notification permission is required", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 OrderAccessibilityService.projectionResultCode = resultCode
                 OrderAccessibilityService.projectionData = data
-                Toast.makeText(this, "Screen capture permission granted", Toast.LENGTH_SHORT).show()
+                currentPermissionStep = PERMISSION_STEP_COMPLETE
+                continuePermissionFlow()
             } else {
+                currentPermissionStep = PERMISSION_STEP_NONE
                 binding.switchEnable.isChecked = false
-                Toast.makeText(this, "Screen capture permission required", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Screen capture permission is required", Toast.LENGTH_LONG).show()
             }
         }
     }
