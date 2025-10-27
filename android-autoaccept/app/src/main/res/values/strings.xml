@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoAccept</string>
+    <string name="accessibility_service_description">AutoAccept service reads order popups and performs gestures</string>
+    <string name="channel_name">AutoAccept Service</string>
+    <string name="channel_description">Keeps AutoAccept running</string>
+    <string name="notification_title">AutoAccept Running</string>
+    <string name="notification_text">Monitoring for orders</string>
+</resources>
